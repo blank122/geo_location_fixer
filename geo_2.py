@@ -12,8 +12,11 @@ from fuzzywuzzy import fuzz  # Install with: pip install fuzzywuzzy python-Leven
 # ========== CONFIGURATION SECTION ==========
 INPUT_CSV = "load41_city.csv"           # Input file with location data
 OUTPUT_CSV = "tagged_geolocation_1.csv" # Output file with updated accuracy
-CHECKPOINT_EVERY = 1000                 # Save progress every 1000 rows
-MAX_THREADS = 5                         # Max threads for parallel geocoding (keep below 10 for Nominatim's policy)
+# In your configuration section:
+CHECKPOINT_EVERY = 500  # Reduce batch size from 1000 to 500
+MAX_THREADS = 2         # Reduce from 5 to 2 or even 1 to comply with Nominatim's policy
+TIMEOUT_PER_BATCH = 600 # Increase from 300 to 600 seconds (10 minutes)
+REQUEST_DELAY = 1.1  # 1.1 seconds between requests (slightly more than Nominatim's 1/sec limit)
 
 # ========== INITIALIZATION ==========
 geolocator = Nominatim(user_agent="geo_checker", timeout=10)  # Initialize the geocoder
@@ -28,7 +31,7 @@ if "geo_accuracy" not in df.columns:
     df["geo_accuracy"] = "unchecked"
 
 # Filter only rows that haven’t been geocoded yet
-df_to_process = df[df["geo_accuracy"] == "unchecked"].head(10)
+df_to_process = df[df["geo_accuracy"] == "unchecked"]
 
 # ========== UTILITY FUNCTIONS ==========
 # Add this near the top of your script
@@ -103,8 +106,12 @@ def normalize_name(name, country_code=None):
 
 def check_location(index, lat, lon, city, country, state_abbrev):
     retries = 3
+    backoff_factor = 1.5  # Time between retries will be (backoff_factor)^attempt
+
     for attempt in range(retries):
         try:
+            time.sleep(REQUEST_DELAY * (attempt + 1))  # Increasing delay with each retry
+            
             location = geolocator.reverse((lat, lon), exactly_one=True, addressdetails=True)
             
             if not location or not hasattr(location, 'raw') or not location.raw.get('address'):
@@ -182,11 +189,15 @@ def check_location(index, lat, lon, city, country, state_abbrev):
                 return index, "inaccurate"
                 
         except GeocoderTimedOut:
-            print(f"[{index}] ⏱ Timeout on attempt {attempt + 1}")
-            time.sleep(2 ** attempt)
+            wait_time = backoff_factor ** (attempt + 1)
+            print(f"[{index}] ⏱ Timeout on attempt {attempt + 1}, waiting {wait_time:.1f}s")
+            time.sleep(wait_time)
+            if attempt == retries - 1:
+                return index, "timeout"
         except Exception as e:
             print(f"[{index}] 🛑 ERROR: {str(e)}")
-            return index, "error"
+            if attempt == retries - 1:
+                return index, "error"
     return index, "unknown"
 
 # ========== PROCESSING SECTION ==========
@@ -204,20 +215,26 @@ for i, row in tqdm(df_to_process.iterrows(), total=len(df_to_process)):
 
         # Multithreaded processing using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=MAX_THREADS) as executor:
-            # Submit each location check to the thread pool
             futures = {executor.submit(check_location, *entry): entry[0] for entry in batch}
-
-            for future in as_completed(futures, timeout=300):  # Wait max 5 minutes per batch
-                index = futures[future]
-                try:
-                    result_index, result_status = future.result(timeout=30)  # Timeout per task
-                    df.at[result_index, "geo_accuracy"] = result_status  # Update DataFrame
-                except FutureTimeoutError:
-                    print(f"[{index}] Task timed out.")
-                    df.at[index, "geo_accuracy"] = "timeout"
-                except Exception as e:
-                    print(f"[{index}] Task failed: {e}")
-                    df.at[index, "geo_accuracy"] = "error"
+            
+            try:
+                for future in as_completed(futures, timeout=TIMEOUT_PER_BATCH):
+                    index = futures[future]
+                    try:
+                        result_index, result_status = future.result(timeout=30)
+                        df.at[result_index, "geo_accuracy"] = result_status
+                    except FutureTimeoutError:
+                        print(f"[{index}] Task timed out.")
+                        df.at[index, "geo_accuracy"] = "timeout"
+                    except Exception as e:
+                        print(f"[{index}] Task failed: {e}")
+                        df.at[index, "geo_accuracy"] = "error"
+            except TimeoutError:
+                print(f"⚠️ Batch timed out with {len(futures)} unfinished tasks. Saving progress...")
+                # Mark unfinished tasks as "timeout"
+                for future in futures:
+                    if not future.done():
+                        df.at[futures[future], "geo_accuracy"] = "timeout"
 
         # Save a checkpoint to CSV after each batch
         print(f"✅ Batch completed. Saving checkpoint...")
