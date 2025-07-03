@@ -17,6 +17,24 @@ MAX_THREADS = 5                         # Max threads for parallel geocoding (ke
 # ========== INITIALIZATION ==========
 geolocator = Nominatim(user_agent="geo_checker", timeout=10)  # Initialize the geocoder
 
+# If we’ve already created a checkpoint, use that; otherwise fall back to the raw input
+if os.path.exists(OUTPUT_CSV):
+    df = pd.read_csv(OUTPUT_CSV)
+else:
+    df = pd.read_csv(
+        INPUT_CSV,
+        header=None,
+        names=["id","city","city1","country","latitude","longitude","state"]
+    )
+
+# ensure our geo_accuracy column exists (and retains old values)
+if "geo_accuracy" not in df.columns:
+    df["geo_accuracy"] = "unchecked"
+
+# Now everything else proceeds as before...
+
+
+
 # Load CSV and assign column names
 df = pd.read_csv(INPUT_CSV, header=None, names=[
     "id", "city", "city1", "country", "latitude", "longitude", "state"

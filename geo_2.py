@@ -21,10 +21,29 @@ REQUEST_DELAY = 1.1  # 1.1 seconds between requests (slightly more than Nominati
 # ========== INITIALIZATION ==========
 geolocator = Nominatim(user_agent="geo_checker", timeout=10)  # Initialize the geocoder
 
-# Load CSV and assign column names
-df = pd.read_csv(INPUT_CSV, header=None, names=[
-    "id", "city", "city1", "country", "latitude", "longitude", "state"
-])
+# ========== INITIALIZATION ==========
+
+# 1) If our checkpoint already exists, load it; otherwise load the raw input
+if os.path.exists(OUTPUT_CSV):
+    print(f"🔄 Resuming from checkpoint {OUTPUT_CSV}")
+    df = pd.read_csv(OUTPUT_CSV)
+else:
+    print(f"🚀 Starting fresh from {INPUT_CSV}")
+    df = pd.read_csv(
+        INPUT_CSV,
+        header=None,
+        names=["id","city","city1","country","latitude","longitude","state"]
+    )
+
+# 2) Make sure every row has a geo_accuracy column
+if "geo_accuracy" not in df.columns:
+    df["geo_accuracy"] = "unchecked"
+
+# 3) Filter to only the rows you haven’t checked yet
+df_to_process = df[df["geo_accuracy"] == "unchecked"]
+
+
+
 
 # Add a new column if not already present
 if "geo_accuracy" not in df.columns:
